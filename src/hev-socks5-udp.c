@@ -9,6 +9,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -24,6 +25,15 @@
 #include "hev-socks5-udp.h"
 
 #define UDP_BUF_SIZE 1500
+
+static void *
+hev_socks5_udp_malloc (size_t size, unsigned int num)
+{
+    if (!num || num > (size_t)-1 / size)
+        return NULL;
+
+    return hev_malloc (size * num);
+}
 
 static int
 task_io_yielder (HevTaskYieldType type, void *data)
@@ -63,8 +73,8 @@ hev_socks5_udp_sendmmsg_tcp (HevSocks5UDP *self, HevSocks5UDPMsg *msgv,
     void *mem;
     int i, res;
 
-    mem = hev_malloc (sizeof (struct iovec) * num * 3 +
-                      sizeof (HevSocks5UDPHdr) * num);
+    mem = hev_socks5_udp_malloc (
+        sizeof (struct iovec) * 3 + sizeof (HevSocks5UDPHdr), num);
     if (!mem)
         return -1;
 
@@ -121,9 +131,10 @@ hev_socks5_udp_sendmmsg_udp (HevSocks5UDP *self, HevSocks5UDPMsg *msgv,
     void *mem;
     int i, res;
 
-    mem = hev_malloc ((sizeof (struct iovec) * 3 + sizeof (struct mmsghdr) +
-                       sizeof (HevSocks5UDPHdr)) *
-                      num);
+    mem = hev_socks5_udp_malloc (sizeof (struct iovec) * 3 +
+                                     sizeof (struct mmsghdr) +
+                                     sizeof (HevSocks5UDPHdr),
+                                 num);
     if (!mem)
         return -1;
 
@@ -172,6 +183,9 @@ int
 hev_socks5_udp_sendmmsg (HevSocks5UDP *self, HevSocks5UDPMsg *msgv,
                          unsigned int num)
 {
+    if (!num || num > INT_MAX / 3)
+        return -1;
+
     switch (HEV_SOCKS5 (self)->type) {
     case HEV_SOCKS5_TYPE_UDP_IN_TCP:
         return hev_socks5_udp_sendmmsg_tcp (self, msgv, num);
@@ -266,7 +280,8 @@ hev_socks5_udp_recvmmsg_udp (HevSocks5UDP *self, HevSocks5UDPMsg *msgv,
     void *mem;
     int i, fd, res;
 
-    mem = hev_malloc ((sizeof (struct mmsghdr) + sizeof (struct iovec)) * num);
+    mem = hev_socks5_udp_malloc (
+        sizeof (struct mmsghdr) + sizeof (struct iovec), num);
     if (!mem)
         return -1;
 
@@ -352,6 +367,9 @@ int
 hev_socks5_udp_recvmmsg (HevSocks5UDP *self, HevSocks5UDPMsg *msgv,
                          unsigned int num, int nonblock)
 {
+    if (!num || num > INT_MAX)
+        return -1;
+
     switch (HEV_SOCKS5 (self)->type) {
     case HEV_SOCKS5_TYPE_UDP_IN_TCP:
         return hev_socks5_udp_recvmmsg_tcp (self, msgv, num, nonblock);
@@ -373,17 +391,17 @@ hev_socks5_udp_fwd_f (HevSocks5UDP *self, int fd, void *buf, unsigned int num,
     void *mem;
     int i, res;
 
-    mem = hev_malloc ((sizeof (HevSocks5UDPMsg) +
-                       sizeof (struct sockaddr_in6) + sizeof (struct mmsghdr) +
-                       sizeof (struct iovec)) *
-                      num);
+    mem = hev_socks5_udp_malloc (
+        sizeof (HevSocks5UDPMsg) + sizeof (struct mmsghdr) +
+            sizeof (struct iovec) + sizeof (struct sockaddr_in6),
+        num);
     if (!mem)
         return -1;
 
     svec = mem;
-    addr = (struct sockaddr_in6 *)&svec[num];
-    dvec = (struct mmsghdr *)&addr[num];
+    dvec = (struct mmsghdr *)&svec[num];
     iov = (struct iovec *)&dvec[num];
+    addr = (struct sockaddr_in6 *)&iov[num];
 
     for (i = 0; i < num; i++) {
         svec[i].buf = buf + UDP_BUF_SIZE * i;
@@ -465,12 +483,12 @@ hev_socks5_udp_fwd_b (HevSocks5UDP *self, int fd, struct mmsghdr *svec,
         char (*saddr)[19];
         void *mem;
 
-        mem = hev_malloc ((sizeof (HevSocks5UDPMsg) + 19) * res);
+        mem = hev_socks5_udp_malloc (sizeof (HevSocks5UDPMsg) + 19, res);
         if (!mem)
             return -1;
 
         dvec = mem;
-        saddr = (char (*)[19])&dvec[res];
+        saddr = (char (*)[19]) & dvec[res];
 
         for (i = 0; i < res; i++) {
             dvec[i].buf = svec[i].msg_hdr.msg_iov->iov_base;
@@ -508,17 +526,20 @@ hev_socks5_udp_splicer (HevSocks5UDP *self, int fd_b)
     LOG_D ("%p socks5 udp splicer", self);
 
     num = hev_socks5_get_udp_copy_buffer_nums ();
-    mem = hev_malloc ((sizeof (struct mmsghdr) +
-                       sizeof (struct sockaddr_in6) + sizeof (struct iovec)) *
-                          num +
-                      UDP_BUF_SIZE * num * 2);
+    if (num <= 0)
+        return -1;
+
+    mem = hev_socks5_udp_malloc (
+        sizeof (struct mmsghdr) + sizeof (struct iovec) +
+            sizeof (struct sockaddr_in6) + UDP_BUF_SIZE * 2,
+        num);
     if (!mem)
         return -1;
 
     vec = mem;
-    addr = (struct sockaddr_in6 *)&vec[num];
-    iov = (struct iovec *)&addr[num];
-    buf = &iov[num];
+    iov = (struct iovec *)&vec[num];
+    addr = (struct sockaddr_in6 *)&iov[num];
+    buf = &addr[num];
 
     fd_a = hev_socks5_udp_get_fd (self);
     if (hev_task_mod_fd (task, fd_a, POLLIN | POLLOUT) < 0)
